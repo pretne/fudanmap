@@ -1,0 +1,431 @@
+<!doctype html>
+<html>
+<head>
+    <title>Leaflet.js Path Display</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        /* 设置左侧容器的样式 */
+        #leftContainer {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 9999;
+            background-color: white;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            width: 300px;
+        }
+
+        /* 输入框容器 */
+        #inputContainer {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        /* 日志内容区域 */
+        #logContent {
+            width: 100%;
+            height: 200px;
+            overflow-y: scroll;
+            border: 1px solid #ccc;
+        }
+
+        /* 地图容器 */
+        #map {
+            width: 100%;
+            height: 100vh;
+        }
+
+        /* 按钮的样式 */
+        button {
+            padding: 10px 20px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 14px;
+            transition: transform 0.2s, background-color 0.2s;
+        }
+
+        button:hover {
+            background-color: #45a049;
+            transform: scale(1.1); /* 点击按钮时的缩放效果 */
+        }
+
+        button:active {
+            background-color: #3e8e41;
+            transform: scale(0.95); /* 点击时缩小按钮 */
+        }
+
+        /* 输入框只有在有内容时才显示 */
+        input {
+            display: none; /* 默认隐藏输入框 */
+        }
+
+        input.show {
+            display: block; /* 内容有时，显示输入框 */
+        }
+    </style>
+</head>
+<body>
+    <!-- 左侧容器 -->
+    <div id="leftContainer">
+        <!-- 输入框和按钮 -->
+        <div id="inputContainer">
+            <p>
+                <label for="startId">起点ID:</label>
+                <input type="text" id="startId" readonly oninput="toggleInputVisibility('startId')">
+            </p>
+            <p>
+                <label for="endId">终点ID:</label>
+                <input type="text" id="endId" readonly oninput="toggleInputVisibility('endId')">
+            </p>
+
+             <!-- 动态生成的途径点输入框 -->
+             <div id="waypointsContainer"></div>
+
+            <!-- 动态生成的中断点输入框 -->
+            <div id="interruptedPointsContainer"></div>
+
+            <button onclick="showShortestPath(document.getElementById('startId').value, document.getElementById('endId').value)">显示最短路径</button>
+            <button onclick="clearInput()">清空输入</button>
+            <select id="algorithm" onchange="algorithm = this.value">
+                <option value="dijkstra">Dijkstra</option>
+                <option value="astar">A*</option>
+            </select>
+            <button onclick="startAddingWaypoint()">添加途径点</button>
+            <button onclick="startInterruptingPath()">添加中断点</button>
+        </div>
+
+        <!-- 日志显示区域 -->
+        <div id="log">
+            <p>日志:</p>
+            <div id="logContent"></div>
+        </div>
+    </div>
+
+    <!-- 地图容器 -->
+    <div id="map"></div>
+
+</body>
+<script>
+    let nodeData = [];
+    let map = undefined;
+    let algorithm = "dijkstra";
+    let markers = [];  // 存储已点击的节点标记
+    let pathPolylines = [];  // 存储最短路径的Polyline
+    let isAddingWaypoint = false; // 是否正在添加途径点
+    let waypoints = []; // 存储途径点ID
+
+    let isInterruptingPath = false; // 是否正在添加中断点
+    let interruptedMarkers = [];  // 存储中断点标记
+    let interruptedPoints = [];  // 用于存储多个中断点的ID
+
+    var greenIcon = new L.Icon({
+        iconUrl: 'https://cdn.rawgit.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
+        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+        iconSize: [25, 41],
+        iconAnchor: [12, 41],
+        popupAnchor: [1, -34],
+        shadowSize: [41, 41]
+    });
+
+    /* 清空input */
+    function clearInput() {
+        document.getElementById('startId').value = "";
+        document.getElementById('endId').value = "";
+        
+        // 清除中断点输入框
+        interruptedPoints = [];
+        const container = document.getElementById('interruptedPointsContainer');
+        container.innerHTML = '';
+
+        // 清除途径点输入框
+        waypoints = [];
+        const container2 = document.getElementById('waypointsContainer');
+        container2.innerHTML = '';
+
+        // 清除所有显示的节点标记
+        markers.forEach(marker => {
+            map.removeLayer(marker);
+        });
+        markers = []; // 清空标记数组
+
+        // 清除中断点标记
+        interruptedMarkers.forEach(marker => {
+            map.removeLayer(marker);
+        });
+        interruptedMarkers = []; // 清空中断点数组
+
+        // 清除最短路径的所有线条
+        pathPolylines.forEach(polyline => {
+            map.removeLayer(polyline);
+        });
+        pathPolylines = [];
+
+        // 重新检查输入框的可见性
+        toggleInputVisibility('startId');
+        toggleInputVisibility('endId');
+    }
+
+    /* 初始化地图 */
+    function initMap() {
+        // 创建地图
+        map = L.map('map').setView([31.2932117, 121.4961761], 18);
+        // 添加地图图层
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+        }).addTo(map);
+
+        // 监听点击事件，显示节点并更新输入框
+        map.on('click', function (e) {
+            let clickedLat = e.latlng.lat;
+            let clickedLon = e.latlng.lng;
+            let nearestNode = getNearestNode(clickedLat, clickedLon);
+
+            if (nearestNode) {
+                let nodeId = nearestNode.id;
+                if (isInterruptingPath) {
+                    // 设置中断点
+                    interruptedPoints.push(nodeId);
+                    updateInterruptedPointsInput();
+                    isInterruptingPath = false; // 关闭中断点设置状态
+                    alert("中断点已设置。");
+
+                    // 创建中断点标记，使用特殊图标
+                    let marker = L.marker([nearestNode.lat, nearestNode.lon], { icon : greenIcon })
+                        .addTo(map)
+                        .bindPopup('中断点: ' + nodeId)
+                        .openPopup();
+                    interruptedMarkers.push(marker);  // 保存中断点标记
+                    
+                } else { 
+                    if (isAddingWaypoint) {
+                        waypoints.push(nodeId);
+                        updateWaypointsInput();
+                        isAddingWaypoint = false;
+                    } else {
+                        let startInput = document.getElementById('startId');
+                        let endInput = document.getElementById('endId');
+
+                        // 只要起点ID为空，就填入起点，否则填入终点
+                        if (!startInput.value) {
+                            startInput.value = nodeId;
+                            toggleInputVisibility('startId'); // 显示起点输入框
+                        } else if (!endInput.value) {
+                            endInput.value = nodeId;
+                            toggleInputVisibility('endId'); // 显示终点输入框
+                        }
+                    }
+
+                    // 显示节点标记
+                    let marker = L.marker([nearestNode.lat, nearestNode.lon]).addTo(map)
+                        .bindPopup('节点ID: ' + nodeId)
+                        .openPopup();
+
+                    markers.push(marker);  // 保存标记
+                }
+
+            }
+        });
+    }
+
+    /* 更新中断点输入框 */
+    function updateInterruptedPointsInput() {
+        const container = document.getElementById('interruptedPointsContainer');
+        container.innerHTML = ''; // 清空容器
+
+        // 根据中断点数组动态生成输入框
+        interruptedPoints.forEach((point, index) => {
+            const div = document.createElement('div');
+            div.classList.add('input-group');
+            const label = document.createElement('label');
+            label.innerText = `中断点ID ${index + 1}:`;
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = point;
+            input.readOnly = true;
+            div.appendChild(label);
+            div.appendChild(input);
+            container.appendChild(div);
+        });
+    }
+
+    /* 更新途径点输入框 */
+    function updateWaypointsInput() {
+        const container = document.getElementById('waypointsContainer');
+        container.innerHTML = ''; // 清空容器
+
+        // 根据途径点数组动态生成输入框
+        waypoints.forEach((point, index) => {
+            const div = document.createElement('div');
+            div.classList.add('input-group');
+            const label = document.createElement('label');
+            label.innerText = `途径点ID ${index + 1}:`;
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = point;
+            input.readOnly = true;
+            div.appendChild(label);
+            div.appendChild(input);
+            container.appendChild(div);
+        });
+    }
+
+    /* 判断输入框是否有内容，控制其显示与隐藏 */
+    function toggleInputVisibility(inputId) {
+        const inputElement = document.getElementById(inputId);
+        if (inputElement.value.trim()) {
+            inputElement.classList.add('show');
+        } else {
+            inputElement.classList.remove('show');
+        }
+    }
+
+    /* 开始添加途径点 */
+    function startAddingWaypoint() {
+        isAddingWaypoint = true;
+        alert("点击地图上的一个点以设置途径点。");
+    }
+
+    /* 开始添加中断点 */
+    function startInterruptingPath() {
+        isInterruptingPath = true;
+        alert("点击地图上的一个点以设置中断点。");
+    }
+
+    /* 获取最接近点击位置的节点 */
+    function getNearestNode(lat, lon) {
+        let nearestNode = null;
+        let minDist = Infinity;
+
+        nodeData.forEach(node => {
+            let dist = Math.sqrt(Math.pow(lat - node.lat, 2) + Math.pow(lon - node.lon, 2));
+            if (dist < minDist) {
+                minDist = dist;
+                nearestNode = node;
+            }
+        });
+
+        return nearestNode;
+    }
+
+    /* 将C++返回的节点数据转换为JS对象 */
+    function convertNodeData(cppNodeData) {
+        jsonNodeData = JSON.parse(cppNodeData);
+        let nodes = [];
+        for (let node in jsonNodeData) {
+            let nodeData = jsonNodeData[node];
+            let nodeObj = {
+                id: nodeData.id,
+                lat: nodeData.lat,
+                lon: nodeData.lon
+            };
+            nodes.push(nodeObj);
+        }
+        return nodes;
+    }
+
+    /* 将C++返回的道路数据转换为JS对象 */
+    function convertWayData(cppWayData) {
+        jsonWayData = JSON.parse(cppWayData);
+        let ways = [];
+        for (let way in jsonWayData) {
+            let wayData = jsonWayData[way];
+            let wayObj = {
+                id: wayData.id,
+                nodes: wayData.nodes
+            };
+            ways.push(wayObj);
+        }
+        return ways;
+    }
+
+    /* 在地图中显示道路 */
+    function showWays() {
+        for (let way in wayData) {
+            let wayObj = wayData[way];
+            let latlngs = [];
+            for (let node in wayObj.nodes) {
+                let nodeObj = wayObj.nodes[node];
+                latlngs.push([nodeObj.lat, nodeObj.lon]);
+            }
+            L.polyline(latlngs, { color: 'red' }).addTo(map);
+        }
+    }
+
+    /* 在地图中显示最短路径 */
+    function showShortestPath(startId, endId) {
+        // 清空地图
+        showWays();
+        
+        // 清除已有的路径
+        pathPolylines.forEach(polyline => {
+            map.removeLayer(polyline);
+        });
+        pathPolylines = [];
+
+        if (!startId || !endId) {
+            alert("请设置起点和终点。");
+            return;
+        }
+
+        let fullPath = [startId, ...waypoints, endId]; // 包括途径点的路径
+        
+        // 依次计算每两点之间的最短路径
+        for (let i = 0; i < fullPath.length - 1; i++) {
+            let fromId = fullPath[i];
+            let toId = fullPath[i + 1];
+            let color = i % 2 == 0 ? 'blue' : 'green';
+            drawPath(fromId, toId, color, interruptedPoints);
+        }
+    }
+
+    /* 绘制路径并记录日志 */
+    function drawPath(fromId, toId, color = '', interruptedPoints = []) {
+        let interruptedJson = JSON.stringify(interruptedPoints);
+
+        let path = undefined;
+        // 调用C++函数获取最短路径
+        if (algorithm == "dijkstra") {
+            path = Module.getShortestPathByDijkstra(fromId, toId, interruptedJson);
+        } else if (algorithm == "astar") {
+            path = Module.getShortestPathByAstar(fromId, toId, interruptedJson);
+        }
+        let pathObj = JSON.parse(path);
+        let latlngs = [];
+        for (let node in pathObj.path) {
+            let nodeObj = pathObj.path[node];
+            latlngs.push([nodeObj.lat, nodeObj.lon]);
+        }
+
+        // 绘制路径
+        let polyline = L.polyline(latlngs, { color }).addTo(map);
+        pathPolylines.push(polyline);
+        
+        let duration = pathObj.duration;
+        let logContent = document.getElementById('logContent');
+        logContent.innerHTML = "从 " + fromId + " 到 " + toId + ": <br>距离: " + pathObj.distance + " <br>时间: " + duration + " 毫秒" + " <br>使用算法: " + algorithm + "<br>" + logContent.innerHTML + "<br>";
+
+        setTimeout(() => {
+            window.alert("从节点 " + fromId + " 到节点 " + toId + " 的最短路径长度为 " + pathObj.distance);
+        }, 0);
+    }
+
+    var Module = {
+        onRuntimeInitialized: function () {
+            initMap();
+            Module.load();
+            nodeData = convertNodeData(Module.getNodes());
+            wayData = convertWayData(Module.getWays());
+            showWays();
+        }
+    };
+</script>
+<script src="test.js"></script>
+</html>
